@@ -4,8 +4,9 @@ Escrow and dispute resolution for commissioned AI model fine-tunes, built as a G
 
 A buyer locks GEN for a trainer. The trainer delivers a Hugging Face commit SHA. The contract fetches the repository metadata pinned to that commit, checks hard anchors in plain code (repository id, resolved commit, weights file prefix, minimum size, base model, license, optional sha256) and asks validators to judge the model card against the task specification. A positive verdict is impossible unless every anchor matched and the model quoted text that really exists in the fetched README. Either party can appeal to a staked commit-reveal jury.
 
-- Contract address: `TBD after Studio deploy`
-- Live demo: `TBD`
+- Contract address (Studio, production variant): `0x1E6Fc52A570abb1E84B55a17C4aB114D9EA876A2`
+- Contract address (Studio, testnet variant, used for the live test runs below): `0x4216f3849aFf00B5DBE46107464e4d4050310D4f`
+- Live demo: https://123cryp.github.io/tunepact/frontend/
 
 ## Files
 
@@ -19,6 +20,20 @@ A buyer locks GEN for a trainer. The trainer delivers a Hugging Face commit SHA.
 | `tests/` | offline GenLayer stub and 150+ tests |
 | `frontend/index.html` | single-file UI, no build step |
 | `docs/` | architecture, lessons, portal text |
+
+## Variants
+
+`tunepact_deploy.py` and `tunepact_testnet.py` contain exactly the same logic. They differ only in seven timing and size constants, so the full flow can be exercised in minutes on the testnet variant.
+
+| Constant | testnet | production |
+|---|---|---|
+| Delivery deadline | 15 minutes | 7 days |
+| Challenge window | 2 minutes | 1 day |
+| Jury commit window | 3 minutes | 12 hours |
+| Jury reveal window | 3 minutes | 12 hours |
+| Stuck-deal recovery timeout | 20 minutes | 7 days |
+| Round 1 jury size | 1 | 3 |
+| Round 2 jury size | 3 | 5 |
 
 ## Flow
 
@@ -45,4 +60,16 @@ Paste `contracts/tunepact_deploy.py` (or `tunepact_testnet.py` for fast windows)
 
 ## Status
 
-The contract logic is covered offline. The Hugging Face API response shape and the GEN payout interface are assumptions that must be confirmed on Studio; see `docs/ARCHITECTURE.md` (Known limits) and run `tools/hf_probe.py` first.
+Verified live on GenLayer Studio with the testnet variant:
+
+| Path | Result |
+|---|---|
+| Hugging Face API fetch and anchor parsing | works against real repositories |
+| Anchor mismatch | UNDETERMINED, buyer refunded, LLM not called |
+| Matching fine-tune (Sohamb2005/gpt2-finetuned-apologies) | DELIVERED with an exact README quote |
+| Trainer payout, buyer refund, 1% fee, treasury withdrawal | all paid out; accounting balanced; contract balance returned to 0 |
+| Jury appeal (deal 4) | juror registration, appeal bond, commit-reveal vote, jury overturned UNDETERMINED to DELIVERED, bond paid to the winning juror, trainer paid, jurors deregistered and refunded; contract balance returned to 0 |
+
+Verified offline only (150+ tests): jury escalation to a second round, juror slashing for no-reveal, and the stuck-deal recovery paths. The live jury test used the testnet variant (1-juror first round).
+
+Note: invalid calls return an `ERR_*` string instead of reverting, so a SUCCESS transaction does not by itself mean the action happened. Read the return value.
