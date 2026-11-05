@@ -1,1 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TunePact - fine-tune delivery escrow</title>
+<style>
+:root{--bg:#0b0b12;--card:#14141f;--line:#26263a;--tx:#ecebf5;--mut:#9a98b3;--a:#a78bfa;--b:#f472b6;--c:#2dd4bf;--ok:#34d399;--warn:#fbbf24;--bad:#f87171}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,"Segoe UI",system-ui,sans-serif}
+a{color:var(--c);text-decoration:none}
+header{position:sticky;top:0;z-index:5;background:rgba(11,11,18,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.bar{max-width:980px;margin:auto;padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.logo{font-family:"Trebuchet MS","Avenir Next",sans-serif;font-weight:800;font-size:20px;letter-spacing:.5px;background:linear-gradient(90deg,var(--a),var(--b),var(--c));-webkit-background-clip:text;background-clip:text;color:transparent}
+nav{display:flex;gap:4px;flex-wrap:wrap;flex:1}
+nav a{padding:6px 10px;border-radius:8px;color:var(--mut)}
+nav a.on{color:var(--tx);background:var(--card)}
+main{max-width:980px;margin:auto;padding:16px 14px 80px}
+h1,h2,h3{font-family:"Trebuchet MS","Avenir Next",sans-serif;margin:.2em 0 .5em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;word-break:break-all}
+.mut{color:var(--mut)}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
+.s-CREATED,.s-FUNDED,.s-SUBMITTED{color:var(--warn)}.s-TIER1_VERDICT,.s-DISPUTED{color:var(--a)}
+.s-FINALIZED{color:var(--ok)}.s-REFUNDED,.s-CANCELLED{color:var(--mut)}
+button,.btn{background:linear-gradient(90deg,var(--a),var(--b));color:#10101a;border:0;border-radius:10px;padding:9px 14px;font-weight:700;cursor:pointer;font-size:14px}
+button.sec{background:var(--line);color:var(--tx)}
+button:disabled{opacity:.5;cursor:wait}
+input,textarea,select{width:100%;background:#0e0e18;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:9px;font:inherit;margin:4px 0 10px}
+label{font-size:13px;color:var(--mut)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:4px 10px;font-size:14px}
+.kv div:nth-child(odd){color:var(--mut)}
+#toasts{position:fixed;bottom:14px;left:14px;right:14px;display:flex;flex-direction:column;gap:8px;align-items:center;z-index:9}
+.toast{background:#1d1d2e;border:1px solid var(--a);border-radius:10px;padding:10px 14px;max-width:560px;word-break:break-word}
+.toast.err{border-color:var(--bad)}
+.empty{text-align:center;color:var(--mut);padding:30px}
+@media(max-width:560px){.kv{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><div class="bar">
+<span class="logo">TunePact</span>
+<nav id="nav">
+<a href="#/" data-r="">Explore</a><a href="#/create" data-r="create">Create</a><a href="#/jury" data-r="jury">Jury</a><a href="#/withdraw" data-r="withdraw">Wallet</a><a href="#/about" data-r="about">About</a>
+</nav>
+<button id="connect" class="sec">Connect wallet</button>
+</div></header>
+<main id="app"><div class="empty">Loading...</div></main>
+<div id="toasts"></div>
+<script type="module">
+const CONFIG = {
+  CONTRACT_ADDRESS: "0x0000000000000000000000000000000000000000",
+  EXPLORER: "https://explorer-studio.genlayer.com",
+  GEN: 10n ** 18n
+};
 
+import { createClient } from "https://esm.sh/genlayer-js@latest";
+import { studionet } from "https://esm.sh/genlayer-js@latest/chains";
+
+const $ = (s, r = document) => r.querySelector(s);
+const app = $("#app");
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const short = (a) => a ? a.slice(0, 6) + "..." + a.slice(-4) : "";
+const gen = (wei) => { const w = BigInt(wei || 0); const whole = w / CONFIG.GEN; const frac = (w % CONFIG.GEN).toString().padStart(18, "0").replace(/0+$/, ""); return whole + (frac ? "." + frac.slice(0, 4) : ""); };
+const toWei = (x) => BigInt(Math.round(parseFloat(x) * 1e6)) * (CONFIG.GEN / 1000000n);
+
+let account = null;
+let reader = createClient({ chain: studionet });
+let writer = null;
+let config = null;
+
+function toast(msg, err) {
+  const t = document.createElement("div");
+  t.className = "toast" + (err ? " err" : "");
+  t.textContent = msg;
+  $("#toasts").appendChild(t);
+  setTimeout(() => t.remove(), err ? 9000 : 5000);
+}
+
+async function view(fn, args = []) {
+  const raw = await reader.readContract({ address: CONFIG.CONTRACT_ADDRESS, functionName: fn, args });
+  if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return raw; } }
+  return raw;
+}
+
+async function connect() {
+  if (!window.ethereum) { toast("No wallet found. Install Rabby or MetaMask.", true); return; }
+  const accts = await window.ethereum.request({ method: "eth_requestAccounts" });
+  account = accts[0].toLowerCase();
+  writer = createClient({ chain: studionet, account: accts[0] });
+  $("#connect").textContent = short(account);
+  route();
+}
+
+async function send(fn, args = [], valueWei = 0n, label) {
+  if (!account) { toast("Connect your wallet first.", true); return null; }
+  try {
+    toast((label || fn) + ": confirm in your wallet...");
+    const req = { address: CONFIG.CONTRACT_ADDRESS, functionName: fn, args };
+    if (valueWei > 0n) req.value = valueWei;
+    const hash = await writer.writeContract(req);
+    toast("Sent. Waiting for consensus...");
+    await writer.waitForTransactionReceipt({ hash, status: "ACCEPTED", retries: 60, interval: 3000 });
+    toast("Done: " + (label || fn) + " " + short(String(hash)));
+    return hash;
+  } catch (e) {
+    toast(String(e && e.message ? e.message : e).slice(0, 300), true);
+    return null;
+  }
+}
+
+const copyBtn = (text) => `<button class="sec" data-copy="${esc(text)}">copy</button>`;
+document.addEventListener("click", (e) => {
+  const c = e.target.closest("[data-copy]");
+  if (c) { navigator.clipboard.writeText(c.dataset.copy); toast("Copied"); }
+});
+
+function loading() { app.innerHTML = '<div class="empty">Loading...</div>'; }
+function fail(e) { app.innerHTML = '<div class="card">Could not load data: ' + esc(e.message || e) + "<br><span class='mut'>Check CONFIG.CONTRACT_ADDRESS at the top of this file.</span></div>"; }
+
+async function getConfig() { if (!config) config = await view("get_config"); return config; }
+
+function dealCard(d) {
+  return `<a href="#/case/${d.deal_id}" class="card" style="display:block;color:inherit">
+    <div class="row" style="justify-content:space-between"><b>#${d.deal_id} ${esc(d.expected_repo_id)}</b><span class="badge s-${d.status}">${d.status}</span></div>
+    <div class="mut mono">${gen(d.payment_amount)} GEN</div>
+    <div class="mut mono">buyer ${short(d.buyer)} / trainer ${short(d.trainer)}</div></a>`;
+}
+
+async function pageExplore() {
+  loading();
+  const deals = await view("list_deals");
+  deals.reverse();
+  app.innerHTML = `<h1>Deals</h1><div class="row"><input id="q" placeholder="Search repo, address, id"><select id="f" style="max-width:200px"><option value="">All statuses</option>${["CREATED","FUNDED","SUBMITTED","TIER1_VERDICT","DISPUTED","FINALIZED","REFUNDED","CANCELLED"].map(s => `<option>${s}</option>`).join("")}</select></div><div id="list" class="grid"></div>`;
+  const draw = () => {
+    const q = $("#q").value.toLowerCase(), f = $("#f").value;
+    const rows = deals.filter(d => (!f || d.status === f) && (!q || JSON.stringify(d).toLowerCase().includes(q)));
+    $("#list").innerHTML = rows.length ? rows.map(dealCard).join("") : '<div class="empty">No deals yet. <a href="#/create">Create the first one</a>.</div>';
+  };
+  $("#q").oninput = draw; $("#f").onchange = draw; draw();
+}
+
+async function pageCreate() {
+  app.innerHTML = `<h1>New deal</h1><div class="card">
+  <label>Trainer wallet (0x...)</label><input id="trainer" class="mono">
+  <label>Payment (GEN, whole number)</label><input id="pay" type="number" min="1" value="10">
+  <label>Task specification</label><textarea id="spec" rows="3" placeholder="Fine-tune Llama-3-8B for support ticket classification"></textarea>
+  <label>Hugging Face repo (owner/name)</label><input id="repo" placeholder="acme/tuned-llama">
+  <label>Weights file prefix</label><input id="prefix" value="model">
+  <label>Minimum total weights size (bytes)</label><input id="minb" type="number" value="1000000000">
+  <label>Expected base model</label><input id="base" placeholder="meta-llama/Llama-3-8B">
+  <label>Required license</label><input id="lic" value="apache-2.0">
+  <label>Weights sha256 (optional, 64 hex)</label><input id="sha" class="mono">
+  <label><input type="checkbox" id="fund" checked style="width:auto"> Fund now (otherwise fund later)</label>
+  <button id="go">Create deal</button></div>`;
+  $("#go").onclick = async (ev) => {
+    ev.target.disabled = true;
+    const pay = BigInt($("#pay").value || 0) * CONFIG.GEN;
+    const args = [$("#trainer").value.trim(), pay, $("#spec").value.trim(), $("#repo").value.trim(), $("#prefix").value.trim(), BigInt($("#minb").value || 0), $("#base").value.trim(), $("#lic").value.trim(), $("#sha").value.trim().toLowerCase()];
+    const h = await send("create_deal", args, $("#fund").checked ? pay : 0n, "Create deal");
+    ev.target.disabled = false;
+    if (h) { const list = await view("list_deals"); location.hash = "#/case/" + list[list.length - 1].deal_id; }
+  };
+}
+
+function kv(pairs) { return '<div class="kv">' + pairs.map(([k, v]) => `<div>${esc(k)}</div><div class="mono">${v}</div>`).join("") + "</div>"; }
+
+async function pageCase(id) {
+  loading();
+  const cfg = await getConfig();
+  const d = await view("get_deal", [BigInt(id)]);
+  if (!d.deal_id) { app.innerHTML = '<div class="empty">Deal not found.</div>'; return; }
+  const me = account || "";
+  const isBuyer = me === d.buyer, isTrainer = me === d.trainer, isParty = isBuyer || isTrainer;
+  const now = Math.floor(Date.now() / 1000);
+  let jury = null, snap = null;
+  if (d.tier1_verdict !== "NONE") snap = await view("get_deal_for_jury", [BigInt(id)]);
+  if (d.current_round > 0) jury = await view("get_jury_round", [BigInt(id), BigInt(d.current_round)]);
+  const bond = (() => { const p = BigInt(d.payment_amount); const pct = p * BigInt(cfg.appeal_bond_bps) / 10000n; const min = BigInt(cfg.min_appeal_bond); return pct > min ? pct : min; })();
+  const acts = [];
+  const add = (id_, label, cls = "") => acts.push(`<button class="${cls}" id="${id_}">${label}</button>`);
+  if (d.status === "CREATED" && isBuyer) { add("a_fund", "Fund " + gen(d.payment_amount) + " GEN"); add("a_cancel", "Cancel", "sec"); }
+  if (d.status === "FUNDED" && isTrainer) acts.push('<input id="rev" placeholder="40-char commit SHA from Hugging Face" class="mono"><button id="a_submit">Submit delivery</button>');
+  if (d.status === "FUNDED" && now > d.last_activity_timestamp + cfg.delivery_deadline_sec) add("a_timeout", "Claim delivery timeout (refund buyer)", "sec");
+  if (d.status === "SUBMITTED") add("a_t1", "Run automated verdict");
+  if (d.status === "TIER1_VERDICT" && now > d.challenge_deadline) add("a_final", "Finalize (no appeal)");
+  if (d.status === "TIER1_VERDICT" && now <= d.challenge_deadline && isParty) add("a_appeal", "Appeal to jury (bond " + gen(bond) + " GEN)");
+  if (d.status === "DISPUTED" && jury && jury.phase !== "RESOLVED") {
+    const iAmJuror = jury.selected.includes(me);
+    if (iAmJuror && jury.phase === "COMMIT" && !jury.committed.includes(me)) acts.push('<select id="vote"><option>DELIVERED</option><option>PARTIALLY_DELIVERED</option><option>NOT_DELIVERED</option></select><button id="a_commit">Commit vote</button>');
+    if (iAmJuror && jury.phase === "REVEAL" && jury.committed.includes(me) && !jury.revealed[me]) add("a_reveal", "Reveal my vote");
+    if (now > jury.phase_deadline) add("a_dead", "Resolve expired round", "sec");
+  }
+  if (!["FINALIZED", "REFUNDED", "CANCELLED"].includes(d.status) && now > d.last_activity_timestamp + cfg.stuck_timeout_sec) add("a_recover", "Recover stuck deal", "sec");
+
+  app.innerHTML = `<div class="row" style="justify-content:space-between"><h1>Deal #${d.deal_id}</h1><span class="badge s-${d.status}">${d.status}</span></div>
+  <div class="card">${kv([
+    ["Payment", gen(d.payment_amount) + " GEN"], ["Buyer", esc(d.buyer)], ["Trainer", esc(d.trainer)],
+    ["Task", esc(d.task_spec)], ["Repository", `<a target="_blank" rel="noopener" href="https://huggingface.co/${esc(d.expected_repo_id)}">${esc(d.expected_repo_id)}</a>`],
+    ["Weights prefix", esc(d.expected_weights_prefix)], ["Min size", esc(d.expected_min_total_size_bytes) + " bytes"],
+    ["Base model", esc(d.expected_base_model)], ["License", esc(d.required_license)], ["sha256", esc(d.expected_sha256 || "-")],
+    ["Delivered revision", esc(d.delivered_revision || "-")], ["Verdict", esc(d.verdict)],
+    ["Challenge deadline", d.challenge_deadline ? new Date(d.challenge_deadline * 1000).toLocaleString() : "-"]])}</div>
+  ${snap ? `<div class="card"><h3>Evidence snapshot</h3>${kv([["Tier-1 verdict", esc(snap.tier1_verdict)], ["Anchors matched", String(snap.anchor_match)], ["Reason", esc(snap.reason)], ["Observed commit", esc(snap.repo_commit_sha)], ["Weights bytes", esc(snap.weights_total_bytes)], ["Base model", esc(snap.base_model)], ["License", esc(snap.license)], ["sha256", esc(snap.sha256)], ["Quoted evidence", esc(snap.quoted_evidence)]])}</div>` : ""}
+  ${jury ? `<div class="card"><h3>Jury round ${jury.round} (${jury.phase})</h3>${kv([["Jurors", jury.selected.map(a => esc(short(a)) + (jury.committed.includes(a) ? " committed" : "") + (jury.revealed[a] ? " voted " + esc(jury.revealed[a]) : "")).join("<br>")], ["Deadline", new Date(jury.phase_deadline * 1000).toLocaleString()], ["Winning", esc(jury.winning || "-")]])}</div>` : ""}
+  <div class="card"><h3>Actions</h3><div class="row">${acts.join("") || '<span class="mut">No actions available for your wallet in this state.</span>'}</div></div>`;
+
+  const on = (i, fn) => { const el = $("#" + i); if (el) el.onclick = async (e) => { e.target.disabled = true; await fn(); e.target.disabled = false; route(); }; };
+  on("a_fund", () => send("fund_deal", [BigInt(id)], BigInt(d.payment_amount), "Fund"));
+  on("a_cancel", () => send("cancel_unfunded", [BigInt(id)]));
+  on("a_submit", () => send("submit_delivery", [BigInt(id), $("#rev").value.trim().toLowerCase()]));
+  on("a_timeout", () => send("claim_delivery_timeout", [BigInt(id)]));
+  on("a_t1", () => send("run_tier1_verdict", [BigInt(id)], 0n, "Automated verdict"));
+  on("a_final", () => send("finalize_unappealed", [BigInt(id)]));
+  on("a_appeal", () => send("escalate_to_jury", [BigInt(id)], bond, "Appeal"));
+  on("a_dead", () => send("resolve_jury_deadlock", [BigInt(id)]));
+  on("a_recover", () => send("recover_stuck_deal", [BigInt(id)]));
+  on("a_commit", async () => {
+    const v = $("#vote").value; const salt = crypto.getRandomValues(new Uint32Array(4)).join("");
+    const data = new TextEncoder().encode(v + ":" + salt + ":" + me);
+    const h = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data))).map(b => b.toString(16).padStart(2, "0")).join("");
+    const ok = await send("commit_jury_vote", [BigInt(id), h], 0n, "Commit vote");
+    if (ok) try { localStorage.setItem("tp:" + id + ":" + jury.round + ":" + me, JSON.stringify({ v, salt })); } catch {}
+  });
+  on("a_reveal", async () => {
+    let saved = null; try { saved = JSON.parse(localStorage.getItem("tp:" + id + ":" + jury.round + ":" + me)); } catch {}
+    if (!saved) { toast("Your saved vote is not in this browser.", true); return; }
+    await send("reveal_jury_vote", [BigInt(id), saved.v, saved.salt], 0n, "Reveal vote");
+  });
+}
+
+async function pageJury() {
+  loading();
+  const cfg = await getConfig();
+  const jurors = await view("list_jurors");
+  const mine = account ? jurors.find(j => j.address === account) : null;
+  const total = BigInt(cfg.juror_bond) + BigInt(cfg.juror_registration_fee);
+  app.innerHTML = `<h1>Jury</h1><div class="card"><p>Jurors stake <b>${gen(cfg.juror_bond)} GEN</b> plus a non-refundable <b>${gen(cfg.juror_registration_fee)} GEN</b> fee. Jurors who do not reveal lose <b>${gen(cfg.juror_slash)} GEN</b>.</p>
+  ${mine ? kv([["Your bond", gen(mine.staked_bond) + " GEN"], ["Active cases", mine.active_case_count], ["Active", String(mine.is_active)]]) : ""}
+  <div class="row" style="margin-top:10px">
+  ${!mine ? `<button id="reg">Register (${gen(total)} GEN)</button>` : ""}
+  ${mine && BigInt(mine.staked_bond) < BigInt(cfg.juror_bond) ? `<button id="top">Top up ${gen(BigInt(cfg.juror_bond) - BigInt(mine.staked_bond))} GEN</button>` : ""}
+  ${mine && BigInt(mine.staked_bond) > 0n ? '<button id="dereg" class="sec">Deregister and withdraw bond</button>' : ""}</div></div>
+  <h3>Registered jurors (${jurors.length})</h3><div class="grid">${jurors.map(j => `<div class="card mono">${esc(short(j.address))}<br>bond ${gen(j.staked_bond)} / cases ${j.active_case_count} / ${j.is_active ? "active" : "inactive"}</div>`).join("") || '<div class="empty">No jurors yet.</div>'}</div>`;
+  const on = (i, fn) => { const el = $("#" + i); if (el) el.onclick = async (e) => { e.target.disabled = true; await fn(); e.target.disabled = false; route(); }; };
+  on("reg", () => send("register_as_juror", [], total, "Register juror"));
+  on("top", () => send("top_up_juror_bond", [], BigInt(cfg.juror_bond) - BigInt(mine.staked_bond), "Top up"));
+  on("dereg", () => send("deregister_juror", []));
+}
+
+async function pageWallet() {
+  loading();
+  const acct = await view("get_accounting");
+  const mine = account ? BigInt(await view("get_withdrawable", [account])) : 0n;
+  const isOwner = account && acct.owner === account;
+  app.innerHTML = `<h1>Wallet</h1><div class="card"><h3>Your withdrawable balance</h3><p class="mono">${account ? gen(mine) + " GEN" : "Connect your wallet"}</p>
+  <button id="wd" ${mine > 0n ? "" : "disabled"}>Withdraw</button></div>
+  ${isOwner ? `<div class="card"><h3>Treasury</h3><p class="mono">${gen(acct.treasury_balance)} GEN</p><button id="wt">Withdraw treasury</button></div>` : ""}
+  <div class="card"><h3>Contract accounting</h3>${kv([["Contract balance", gen(acct.contract_balance) + " GEN"], ["Escrow", gen(acct.total_escrow_held)], ["Pending withdrawals", gen(acct.total_withdrawable)], ["Juror bonds", gen(acct.total_staked_juror_bonds)], ["Appeal bonds", gen(acct.total_appeal_bonds_held)], ["Treasury", gen(acct.treasury_balance)], ["Balanced", String(acct.balanced)]])}</div>`;
+  const on = (i, fn) => { const el = $("#" + i); if (el) el.onclick = async (e) => { e.target.disabled = true; await fn(); e.target.disabled = false; route(); }; };
+  on("wd", () => send("withdraw", []));
+  on("wt", () => send("withdraw_treasury", []));
+}
+
+function pageAbout() {
+  app.innerHTML = `<h1>About TunePact</h1><div class="card"><p>TunePact is an escrow for commissioned AI model fine-tunes. A buyer locks GEN, the trainer delivers a pinned Hugging Face commit, and the contract fetches the repository metadata and model card, checks hard anchors in code and asks validators to judge the card against the task.</p>
+  <p>Either party can appeal to a staked commit-reveal jury. All payouts are pull payments.</p>
+  <p class="mono">Contract: ${esc(CONFIG.CONTRACT_ADDRESS)} ${copyBtn(CONFIG.CONTRACT_ADDRESS)}</p>
+  <p><a target="_blank" rel="noopener" href="${esc(CONFIG.EXPLORER)}">Open explorer</a></p></div>`;
+}
+
+async function route() {
+  const h = location.hash.replace(/^#\/?/, "");
+  const [p, arg] = h.split("/");
+  document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("on", a.dataset.r === (p || "")));
+  try {
+    if (p === "create") await pageCreate();
+    else if (p === "case" && arg) await pageCase(arg);
+    else if (p === "jury") await pageJury();
+    else if (p === "withdraw") await pageWallet();
+    else if (p === "about") pageAbout();
+    else await pageExplore();
+  } catch (e) { fail(e); }
+}
+window.addEventListener("hashchange", route);
+$("#connect").onclick = connect;
+route();
+</script>
+</body>
+</html>
